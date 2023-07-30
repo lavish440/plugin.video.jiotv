@@ -212,3 +212,7 @@ msgstr ""
 msgctxt "#33048"
 msgid "Enable the channel numbering in addon's submenus"
 msgstr ""
+
+msgctxt "#33049"
+msgid "Generate EPG"
+msgstr ""

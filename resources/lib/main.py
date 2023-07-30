@@ -52,7 +52,6 @@ import urlquick
 from uuid import uuid4
 from urllib.parse import urlencode
 import inputstreamhelper
-import json
 from time import time, sleep
 from datetime import datetime, timedelta, date
 import m3u8
@@ -60,6 +59,8 @@ import requests
 import gzip
 import xml.etree.ElementTree as ET
 import os
+import xmltodict
+from concurrent.futures.thread import ThreadPoolExecutor
 
 # Root path of plugin
 
@@ -739,3 +740,99 @@ def cleanup(plugin):
     urlquick.cache_cleanup(-1)
     cleanLocalCache()
     Script.notify("Cache Cleaned", "")
+
+
+@Script.register
+def epg_generate(plugin):
+    Script.notify("EPG", "Enter")
+    EPG_API = "http://jiotv.data.cdn.jio.com/apis"
+    EPG_IMG = "http://jiotv.catchup.cdn.jio.com/dare_images"
+    EPG_channel = []
+    EPG_programme = []
+    EPG_error = []
+    EPG_result = []
+    done = 0
+
+    def genEPG(i, c):
+        Script.notify("EPG", "GENERATE")
+        global EPG_channel, EPG_programme, EPG_error, EPG_result, EPG_API, EPG_IMG, done
+        # for day in range(-7, 8):
+        # 1 day future , today and two days past to play catchup
+        for day in range(-2, 2):
+            try:
+                resp = requests.get(
+                    f"{EPG_API}/v1.3/getepg/get",
+                    params={
+                        "offset": day,
+                        "EPG_channel_id": c["EPG_channel_id"],
+                        "langId": "6",
+                    },
+                ).json()
+                day == 0 and EPG_channel.append(
+                    {
+                        "@id": c["EPG_channel_id"],
+                        "display-name": c["EPG_channel_name"],
+                        "icon": {"@src": f"{EPG_IMG}/images/{c['logoUrl']}"},
+                    }
+                )
+                for eachEGP in resp.get("epg"):
+                    pdict = {
+                        "@start": datetime.utcfromtimestamp(
+                            int(eachEGP["startEpoch"] * 0.001)
+                        ).strftime("%Y%m%d%H%M%S"),
+                        "@stop": datetime.utcfromtimestamp(
+                            int(eachEGP["endEpoch"] * 0.001)
+                        ).strftime("%Y%m%d%H%M%S"),
+                        "@EPG_channel": eachEGP["EPG_channel_id"],
+                        "@catchup-id": eachEGP["srno"],
+                        "title": eachEGP["showname"],
+                        "desc": eachEGP["description"],
+                        "category": eachEGP["showCategory"],
+                        # "date": datetime.today().strftime('%Y%m%d'),
+                        # "star-rating": {
+                        #     "value": "10/10"
+                        # },
+                        "icon": {"@src": f"{EPG_IMG}/shows/{eachEGP['episodePoster']}"},
+                    }
+                    if eachEGP["episode_num"] > -1:
+                        pdict["episode-num"] = {
+                            "@system": "xmltv_ns",
+                            "#text": f"0.{eachEGP['episode_num']}",
+                        }
+                    if eachEGP.get("director") or eachEGP.get("starCast"):
+                        pdict["credits"] = {
+                            "director": eachEGP.get("director"),
+                            "actor": eachEGP.get("starCast")
+                            and eachEGP.get("starCast").split(", "),
+                        }
+                    if eachEGP.get("episode_desc"):
+                        pdict["sub-title"] = eachEGP.get("episode_desc")
+                    EPG_programme.append(pdict)
+            except Exception as e:
+                print(e)
+                EPG_error.append(c["EPG_channel_id"])
+        done += 1
+        # print(f"{done*100/len(EPG_result):.2f} %", end="\r")
+
+    if __name__ == "__main__":
+        stime = time.time()
+        # prms = {"os": "android", "devicetype": "phone"}
+        raw = requests.get(
+            f"{EPG_API}/v3.0/getMobileEPG_channelList/get/?langId=6&os=android&devicetype=phone&usertype=tvYR7NSNn7rymo3F&version=285"
+        ).json()
+        EPG_result = raw.get("EPG_result")
+        with ThreadPoolExecutor() as e:
+            e.map(genEPG, range(len(EPG_result)), EPG_result)
+        epgdict = {"tv": {"EPG_channel": EPG_channel, "EPG_programme": EPG_programme}}
+        epgxml = xmltodict.unparse(epgdict, pretty=True)
+        with open("epg.xml.gz", "wb+") as f:
+            f.write(gzip.compress(epgxml.encode("utf-8")))
+        # with open(sys.argv[1], 'rb') as f_in:
+        #     with gzip.open(sys.argv[2], 'wb+') as f_out:
+        #         f_out.write(gzip.compress(epgxml.encode('utf-8')))
+        print("EPG updated", datetime.now())
+        if len(EPG_error) > 0:
+            # print(f"EPG_error in {EPG_error}")
+            Script.notify("EPG", "ERROR")
+        # print(f"Took {time.time()-stime:.2f} seconds")
+        Script.notify("EPG", "SUCCESS")
